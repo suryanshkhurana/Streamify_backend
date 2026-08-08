@@ -1,0 +1,16 @@
+/**
+ * AWS S3 client singleton for stream-service.
+ * Handles both download (raw uploads from catalog-service) and
+ * upload (HLS segments + manifests).
+ */
+
+import { S3Client } from '@aws-sdk/client-s3';
+import { env } from './env.js';
+
+export const s3 = new S3Client({
+  region: env.awsRegion,
+  credentials: {
+    accessKeyId: env.awsAccessKeyId,
+    secretAccessKey: env.awsSecretAccessKey,
+  },
+});

@@ -1,0 +1,66 @@
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+
+# ─── Build outputs ────────────────────────────────────────────────────────────
+dist/
+build/
+.next/
+out/
+
+# ─── Prisma generated client (auto-generated, contains platform-specific binaries)
+**/prisma/generated/
+**/*.dll.node
+**/*.dll.node.tmp*
+
+# ─── Turbo cache ──────────────────────────────────────────────────────────────
+.turbo/
+
+# ─── Environment files (NEVER commit secrets) ─────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.env
+
+# ─── TypeScript ───────────────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── Test coverage & load test results ───────────────────────────────────────
+coverage/
+tests/load/results/
+
+# ─── Docker volumes (local dev) ───────────────────────────────────────────────
+.docker/
+
+# ─── AWS / Security (NEVER commit keys) ──────────────────────────────────────
+.aws/
+private_key.pem
+public_key.pem
+*.pem
+*.key
+
+# ─── Local binaries (k6, etc.) do NOT commit large binaries ────────────────
+bin/
+
+# ─── Misc project-specific ───────────────────────────────────────────────────
+cloudfront_setup.md
+reset-all.ts
+
+# Frontend (lives in its own repo)
+apps/web/

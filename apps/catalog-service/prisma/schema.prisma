@@ -1,0 +1,108 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Streamify Catalog Service — Prisma Schema
+// Database: PostgreSQL 16
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  output   = "./generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum TrackStatus {
+  PENDING      // S3 presigned URL issued — awaiting upload
+  PROCESSING   // Upload confirmed — transcoding pipeline running
+  READY        // Transcoded and available for streaming
+  FAILED       // Transcoding or upload failed
+}
+
+enum AlbumType {
+  ALBUM
+  EP
+  SINGLE
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+/// Artist profile — created automatically when a user uploads their first track.
+/// artistId maps to the auth-service userId (UUID) so we can link profiles.
+model Artist {
+  id          String   @id @default(uuid())
+  /// The UUID from auth-service / user-service (foreign identity)
+  userId      String   @unique
+  name        String
+  bio         String?
+  avatarUrl   String?
+  country     String?
+  genres      String[]
+  isVerified  Boolean  @default(false)
+
+  albums      Album[]
+  tracks      Track[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@map("artists")
+}
+
+model Album {
+  id           String     @id @default(uuid())
+  title        String
+  artistId     String
+  artist       Artist     @relation(fields: [artistId], references: [id], onDelete: Cascade)
+  type         AlbumType  @default(ALBUM)
+  coverUrl     String?
+  releaseDate  DateTime?
+  genres       String[]
+  isExplicit   Boolean    @default(false)
+
+  tracks       Track[]
+
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([artistId])
+  @@map("albums")
+}
+
+model Track {
+  id            String      @id @default(uuid())
+  title         String
+  artistId      String
+  artist        Artist      @relation(fields: [artistId], references: [id], onDelete: Cascade)
+  albumId       String?
+  album         Album?      @relation(fields: [albumId], references: [id], onDelete: SetNull)
+
+  /// Duration in seconds — populated after transcoding completes
+  durationMs    Int?
+  trackNumber   Int?
+  genres        String[]
+  isExplicit    Boolean     @default(false)
+
+  /// S3 object key for the raw uploaded file (before transcoding)
+  s3Key         String?
+  /// S3 object key for the HLS/transcoded output
+  s3KeyHls      String?
+  /// Public CDN URL for the album art / track artwork
+  coverUrl      String?
+
+  status        TrackStatus @default(PENDING)
+  playCount     BigInt      @default(0)
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([artistId])
+  @@index([albumId])
+  @@index([status])
+  @@map("tracks")
+}

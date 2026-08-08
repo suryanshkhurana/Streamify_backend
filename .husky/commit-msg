@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Validate commit message follows Conventional Commits format
+# feat:, fix:, chore:, docs:, refactor:, test:, perf:, ci:, build:, revert:
+commit_regex='^(feat|fix|chore|docs|refactor|test|perf|ci|build|revert)(\(.+\))?: .{1,100}'
+
+if ! grep -qE "$commit_regex" "$1"; then
+  echo "❌ Invalid commit message. Must follow Conventional Commits format:"
+  echo "   feat: add new feature"
+  echo "   fix(auth): resolve token refresh bug"
+  exit 1
+fi

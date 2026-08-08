@@ -1,0 +1,73 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Streamify Auth Service — Prisma Schema
+// Database: PostgreSQL 16
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  output   = "./generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Plan {
+  FREE
+  PREMIUM
+}
+
+enum OAuthProvider {
+  LOCAL
+  GOOGLE
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id            String        @id @default(uuid())
+  email         String        @unique
+  displayName   String
+  /// Argon2 / bcrypt hash — null for OAuth-only accounts
+  passwordHash  String?
+  provider      OAuthProvider @default(LOCAL)
+  /// Google subject ID — unique across Google accounts
+  googleId      String?       @unique
+  plan          Plan          @default(FREE)
+  isActive      Boolean       @default(true)
+  /// Whether the user has verified their email address
+  emailVerified Boolean       @default(false)
+
+  refreshTokens RefreshToken[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@index([googleId])
+  @@map("users")
+}
+
+model RefreshToken {
+  /// UUID v4 — the raw token value stored in the httpOnly cookie
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Absolute expiry timestamp (mirrors TTL stored in Redis)
+  expiresAt DateTime
+  /// Set to true when the user explicitly logs out or the token is rotated
+  revoked   Boolean  @default(false)
+  /// Client IP stored for security audit logs
+  userAgent String?
+  ipAddress String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([revoked, expiresAt])
+  @@map("refresh_tokens")
+}

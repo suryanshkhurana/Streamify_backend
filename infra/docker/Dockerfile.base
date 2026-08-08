@@ -1,0 +1,41 @@
+# Base Dockerfile for Node.js microservices
+# Each service has its own Dockerfile that sets ARG SERVICE_NAME=<service>
+# and extends this pattern.
+
+# ── Stage 1: Dependencies ──────────────────────────────────────────────────
+FROM node:20-alpine AS deps
+RUN corepack enable && corepack prepare pnpm@9 --activate
+WORKDIR /app
+
+# Copy workspace manifests for layer caching
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY packages/shared-types/package.json ./packages/shared-types/
+COPY packages/shared-middleware/package.json ./packages/shared-middleware/
+COPY packages/shared-utils/package.json ./packages/shared-utils/
+
+ARG SERVICE_NAME
+COPY apps/${SERVICE_NAME}/package.json ./apps/${SERVICE_NAME}/
+
+RUN pnpm install --frozen-lockfile --filter @streamify/${SERVICE_NAME}...
+
+# ── Stage 2: Build ─────────────────────────────────────────────────────────
+FROM deps AS builder
+COPY packages ./packages
+ARG SERVICE_NAME
+COPY apps/${SERVICE_NAME} ./apps/${SERVICE_NAME}
+RUN pnpm --filter @streamify/${SERVICE_NAME}... run build
+
+# ── Stage 3: Production ────────────────────────────────────────────────────
+FROM node:20-alpine AS runner
+RUN corepack enable && corepack prepare pnpm@9 --activate
+WORKDIR /app
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages ./packages
+ARG SERVICE_NAME
+COPY --from=builder /app/apps/${SERVICE_NAME}/dist ./apps/${SERVICE_NAME}/dist
+COPY --from=builder /app/apps/${SERVICE_NAME}/package.json ./apps/${SERVICE_NAME}/package.json
+
+ENV NODE_ENV=production
+ARG SERVICE_NAME
+CMD ["node", "apps/${SERVICE_NAME}/dist/index.js"]

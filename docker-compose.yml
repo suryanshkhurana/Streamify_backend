@@ -1,0 +1,522 @@
+# =============================================================================
+# Streamify — Full Stack Docker Compose
+#
+# Infrastructure (local Docker):  PostgreSQL, Redis, RabbitMQ, Elasticsearch
+# Databases (external Atlas):     MongoDB  →  passed in via MONGODB_URI env var
+#
+# Usage:
+#   docker compose up --build          # Start everything
+#   docker compose up postgres redis rabbitmq elasticsearch -d  # Infra only
+#
+# Secrets: copy .env.example → .env at the repo root and fill in Atlas URIs
+#   and any other secrets before running.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Top-level shared environment fragment (YAML anchors)
+# ---------------------------------------------------------------------------
+x-rabbitmq-url:  &rabbitmq-url  amqp://streamify:streamify_dev_password@rabbitmq:5672
+x-redis-url:     &redis-url     redis://redis:6379
+x-jwt-secret:    &jwt-secret    ${JWT_SECRET:-CHANGE_ME_jwt_secret_at_least_32_chars_long}
+x-cors-origin:   &cors-origin   ${CORS_ORIGIN:-http://localhost:5173}
+
+services:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LOCAL INFRASTRUCTURE
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: streamify-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     streamify
+      POSTGRES_PASSWORD: streamify_dev_password
+      # Both databases are created at first boot via init scripts or migrations.
+      # We default to "streamify"; each service targets its own DB via DATABASE_URL.
+      POSTGRES_DB:       streamify
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - streamify-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streamify"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  mongodb:
+    image: mongo:7
+    container_name: streamify-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - streamify-net
+    healthcheck:
+      test: ["CMD","mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: streamify-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "36379:6379"   # host 36379 → container 6379  (avoids conflicts)
+    volumes:
+      - redis_data:/data
+    networks:
+      - streamify-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: streamify-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: streamify
+      RABBITMQ_DEFAULT_PASS: streamify_dev_password
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI  →  http://localhost:15672
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - streamify-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
+    container_name: streamify-elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - streamify-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # APPLICATION SERVICES
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ---------------------------------------------------------------------------
+  # API Gateway  (port 3000)
+  # Single public entry point. JWT validation + rate-limiting + reverse proxy.
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: .
+      dockerfile: apps/api-gateway/Dockerfile
+    container_name: streamify-api-gateway
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      LOG_LEVEL: info
+      CORS_ORIGIN: *cors-origin
+      JWT_SECRET: *jwt-secret
+      REDIS_URL: *redis-url
+      # Upstream service hostnames inside the Docker network
+      AUTH_SERVICE_URL:           http://auth-service:3001
+      USER_SERVICE_URL:           http://user-service:3002
+      CATALOG_SERVICE_URL:        http://catalog-service:3003
+      STREAM_SERVICE_URL:         http://stream-service:3004
+      SEARCH_SERVICE_URL:         http://search-service:3005
+      PLAYLIST_SERVICE_URL:       http://playlist-service:3006
+      RECOMMENDATION_SERVICE_URL: http://recommendation-service:3007
+      # Legacy port env vars (kept for backward compatibility with gateway code)
+      AUTH_SERVICE_PORT: 3001
+      USER_SERVICE_PORT: 3002
+      CATALOG_SERVICE_PORT: 3003
+      STREAM_SERVICE_PORT: 3004
+      SEARCH_SERVICE_PORT: 3005
+      PLAYLIST_SERVICE_PORT: 3006
+      RECOMMENDATION_SERVICE_PORT: 3007
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      user-service:
+        condition: service_started
+      catalog-service:
+        condition: service_started
+      stream-service:
+        condition: service_started
+      search-service:
+        condition: service_started
+      playlist-service:
+        condition: service_started
+      recommendation-service:
+        condition: service_started
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Auth Service  (port 3001)
+  # PostgreSQL + Redis + RabbitMQ publisher.
+  # Google OAuth2 credentials sourced from .env (never hardcoded).
+  # ---------------------------------------------------------------------------
+  auth-service:
+    build:
+      context: .
+      dockerfile: apps/auth-service/Dockerfile
+    container_name: streamify-auth-service
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: 3001
+      NODE_ENV: production
+      LOG_LEVEL: info
+      DATABASE_URL: postgresql://streamify:streamify_dev_password@postgres:5432/streamify_auth
+      REDIS_URL:    *redis-url
+      RABBITMQ_URL: *rabbitmq-url
+      JWT_SECRET:         *jwt-secret
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-CHANGE_ME_refresh_secret_at_least_32_chars}
+      CORS_ORIGIN:        *cors-origin
+      FRONTEND_URL:       ${FRONTEND_URL:-http://localhost:5173}
+      # Google OAuth2 — set in your root .env file
+      GOOGLE_CLIENT_ID:     ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_CALLBACK_URL:  ${GOOGLE_CALLBACK_URL:-http://localhost:3001/auth/oauth/google/callback}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # User Service  (port 3002)
+  # MongoDB Atlas (external) + Redis cache + RabbitMQ consumer + S3 avatars.
+  # ---------------------------------------------------------------------------
+  user-service:
+    build:
+      context: .
+      dockerfile: apps/user-service/Dockerfile
+    container_name: streamify-user-service
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    environment:
+      PORT: 3002
+      NODE_ENV: production
+      LOG_LEVEL: info
+      # MongoDB Atlas — set MONGODB_URI_USERS in your root .env
+      MONGODB_URI:   ${MONGODB_URI_USERS}
+      REDIS_URL:     *redis-url
+      RABBITMQ_URL:  *rabbitmq-url
+      JWT_SECRET:    *jwt-secret
+      CORS_ORIGIN:   *cors-origin
+      # AWS S3 for avatar uploads
+      S3_BUCKET:             ${S3_BUCKET:-streamify-music-storage}
+      AWS_REGION:            ${AWS_REGION:-ap-south-1}
+      AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      CLOUDFRONT_DOMAIN:     ${CLOUDFRONT_DOMAIN}
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Catalog Service  (port 3003)
+  # PostgreSQL + S3 presigned uploads + RabbitMQ publisher.
+  # ---------------------------------------------------------------------------
+  catalog-service:
+    build:
+      context: .
+      dockerfile: apps/catalog-service/Dockerfile
+    container_name: streamify-catalog-service
+    restart: unless-stopped
+    ports:
+      - "3003:3003"
+    environment:
+      PORT: 3003
+      NODE_ENV: production
+      LOG_LEVEL: info
+      DATABASE_URL: postgresql://streamify:streamify_dev_password@postgres:5432/streamify_catalog
+      RABBITMQ_URL: *rabbitmq-url
+      JWT_SECRET:   *jwt-secret
+      CORS_ORIGIN:  *cors-origin
+      # AWS S3 for audio file uploads
+      S3_BUCKET:             ${S3_BUCKET:-streamify-music-storage}
+      AWS_REGION:            ${AWS_REGION:-ap-south-1}
+      AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Stream Service  (port 3004)
+  # FFmpeg HLS transcoding + S3 storage + CloudFront signed URLs.
+  # ---------------------------------------------------------------------------
+  stream-service:
+    build:
+      context: .
+      dockerfile: apps/stream-service/Dockerfile
+    container_name: streamify-stream-service
+    restart: unless-stopped
+    ports:
+      - "3004:3004"
+    environment:
+      PORT: 3004
+      NODE_ENV: production
+      LOG_LEVEL: info
+      RABBITMQ_URL:        *rabbitmq-url
+      JWT_SECRET:          *jwt-secret
+      CORS_ORIGIN:         *cors-origin
+      CATALOG_SERVICE_URL: http://catalog-service:3003
+      # AWS S3 + CloudFront
+      S3_BUCKET:              ${S3_BUCKET:-streamify-music-storage}
+      AWS_REGION:             ${AWS_REGION:-ap-south-1}
+      AWS_ACCESS_KEY_ID:      ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY:  ${AWS_SECRET_ACCESS_KEY}
+      CLOUDFRONT_DOMAIN:      ${CLOUDFRONT_DOMAIN}
+      CLOUDFRONT_KEY_PAIR_ID: ${CLOUDFRONT_KEY_PAIR_ID}
+      CLOUDFRONT_PRIVATE_KEY: ${CLOUDFRONT_PRIVATE_KEY}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      catalog-service:
+        condition: service_started
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Search Service  (port 3005)
+  # Elasticsearch indexes + Redis cache + RabbitMQ consumer.
+  # ---------------------------------------------------------------------------
+  search-service:
+    build:
+      context: .
+      dockerfile: apps/search-service/Dockerfile
+    container_name: streamify-search-service
+    restart: unless-stopped
+    ports:
+      - "3005:3005"
+    environment:
+      PORT: 3005
+      NODE_ENV: production
+      LOG_LEVEL: info
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      REDIS_URL:         *redis-url
+      RABBITMQ_URL:      *rabbitmq-url
+      JWT_SECRET:        *jwt-secret
+      CORS_ORIGIN:       *cors-origin
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Playlist Service  (port 3006)
+  # MongoDB Atlas (external) + RabbitMQ.
+  # ---------------------------------------------------------------------------
+  playlist-service:
+    build:
+      context: .
+      dockerfile: apps/playlist-service/Dockerfile
+    container_name: streamify-playlist-service
+    restart: unless-stopped
+    ports:
+      - "3006:3006"
+    environment:
+      PORT: 3006
+      NODE_ENV: production
+      LOG_LEVEL: info
+      # MongoDB Atlas — set MONGODB_URI_PLAYLISTS in your root .env
+      MONGODB_URI:  ${MONGODB_URI_PLAYLISTS}
+      RABBITMQ_URL: *rabbitmq-url
+      JWT_SECRET:   *jwt-secret
+      CORS_ORIGIN:  *cors-origin
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Recommendation Service  (port 3007)
+  # MongoDB Atlas (external) + Redis scoring + RabbitMQ consumer.
+  # ---------------------------------------------------------------------------
+  recommendation-service:
+    build:
+      context: .
+      dockerfile: apps/recommendation-service/Dockerfile
+    container_name: streamify-recommendation-service
+    restart: unless-stopped
+    ports:
+      - "3007:3007"
+    environment:
+      PORT: 3007
+      NODE_ENV: production
+      LOG_LEVEL: info
+      # MongoDB Atlas — set MONGODB_URI_RECOMMENDATIONS in your root .env
+      MONGODB_URI:  ${MONGODB_URI_RECOMMENDATIONS}
+      REDIS_URL:    *redis-url
+      RABBITMQ_URL: *rabbitmq-url
+      JWT_SECRET:   *jwt-secret
+      CORS_ORIGIN:  *cors-origin
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Notification Service  (internal — no public port)
+  # Listens to RabbitMQ; sends emails (Nodemailer) and push (Firebase FCM).
+  # ---------------------------------------------------------------------------
+  notification-service:
+    build:
+      context: .
+      dockerfile: apps/notification-service/Dockerfile
+    container_name: streamify-notification-service
+    restart: unless-stopped
+    # No external port — purely event-driven, never called directly by gateway
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      RABBITMQ_URL: *rabbitmq-url
+      # SMTP / email credentials — set in root .env
+      SMTP_HOST:     ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT:     ${SMTP_PORT:-587}
+      SMTP_USER:     ${SMTP_USER}
+      SMTP_PASS:     ${SMTP_PASS}
+      EMAIL_FROM:    ${EMAIL_FROM:-noreply@streamify.app}
+      # Firebase Admin SDK for push notifications — set in root .env
+      FIREBASE_PROJECT_ID:      ${FIREBASE_PROJECT_ID}
+      FIREBASE_PRIVATE_KEY:     ${FIREBASE_PRIVATE_KEY}
+      FIREBASE_CLIENT_EMAIL:    ${FIREBASE_CLIENT_EMAIL}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Analytics Service  (internal — no public port)
+  # Listens to track.played events; writes to ClickHouse.
+  # ---------------------------------------------------------------------------
+  analytics-service:
+    build:
+      context: .
+      dockerfile: apps/analytics-service/Dockerfile
+    container_name: streamify-analytics-service
+    restart: unless-stopped
+    # No external port — purely event-driven
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      RABBITMQ_URL:     *rabbitmq-url
+      # ClickHouse connection — set in root .env
+      CLICKHOUSE_URL:      ${CLICKHOUSE_URL:-http://localhost:8123}
+      CLICKHOUSE_USER:     ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-streamify_analytics}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - streamify-net
+
+  # ---------------------------------------------------------------------------
+  # Web  (React / Vite SPA — port 5173)
+  # Built and served by Vite dev server inside Docker.
+  # In production this would be a static export served by Nginx.
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: streamify-web
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL:    ${VITE_API_BASE_URL:-http://localhost:3000}
+      VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+    depends_on:
+      - api-gateway
+    networks:
+      - streamify-net
+
+# =============================================================================
+# Named Volumes  (local infrastructure data only — no MongoDB volume)
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+  es_data:
+    driver: local
+  mongodb_data:
+    driver: local
+
+# =============================================================================
+# Shared Network
+# =============================================================================
+networks:
+  streamify-net:
+    driver: bridge
+    name: streamify-net
