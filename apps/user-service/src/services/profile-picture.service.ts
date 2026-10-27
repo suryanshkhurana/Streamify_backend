@@ -29,7 +29,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { s3, S3_BUCKET, cfUrl } from '../config/s3.js';
-import { Profile } from '../models/Profile.js';
+import { prisma } from '../config/prisma.js';
 import { AppError } from '@streamify/shared-middleware';
 import { logger } from '@streamify/shared-middleware';
 import { redis, profileCacheKey } from '../config/redis.js';
@@ -151,20 +151,19 @@ export async function confirmUpload(
   await validateMagicBytes(s3Key);
 
   // ── Fetch current profile to capture old avatarUrl ───────────────────────────
-  const doc = await Profile.findOne({ authId }).lean();
+  const doc = await prisma.profile.findUnique({ where: { authId } });
   if (!doc) throw AppError.notFound('Profile not found');
 
-  const previousAvatarUrl: string | undefined = doc.avatarUrl;
+  const previousAvatarUrl: string | null = doc.avatarUrl;
 
   // ── Compute new CloudFront URL ────────────────────────────────────────────────
   const newAvatarUrl = cfUrl(s3Key);
 
-  // ── Persist to MongoDB ────────────────────────────────────────────────────────
-  await Profile.updateOne(
-    { authId },
-    { $set: { avatarUrl: newAvatarUrl } },
-    { runValidators: true },
-  );
+  // ── Persist to Postgres ────────────────────────────────────────────────────────
+  await prisma.profile.update({
+    where: { authId },
+    data: { avatarUrl: newAvatarUrl },
+  });
 
   // ── Invalidate Redis cache ────────────────────────────────────────────────────
   try {

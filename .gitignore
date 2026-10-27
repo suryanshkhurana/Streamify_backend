@@ -61,6 +61,16 @@ bin/
 # ─── Misc project-specific ───────────────────────────────────────────────────
 cloudfront_setup.md
 reset-all.ts
+reset-data.ps1
+reset.sql
+sync_avatars.js
+index_es.js
+query.sql
+*.txt
+apps/playlist-service/test-likes.js
+
+# ─── Temporary migration directories (contain raw DB credentials) ────────────
+migration-temp-*/
 
 # Frontend (lives in its own repo)
 apps/web/

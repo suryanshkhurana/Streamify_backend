@@ -38,9 +38,7 @@ import { PFP_CLEANUP_QUEUE } from '../events/publisher.js';
 
 const EXCHANGE_NAME = 'streamify.events';
 const EXCHANGE_TYPE = 'topic';
-const RABBITMQ_URL =
-  process.env['RABBITMQ_URL'] ??
-  'amqp://streamify:streamify_dev_password@localhost:5672';
+const RABBITMQ_URL = process.env['RABBITMQ_URL'] as string;
 
 const QUEUES = {
   USER_REGISTERED: 'user-service.user.registered',

@@ -32,9 +32,7 @@ let channel: amqplib.Channel | null = null;
 async function getChannel(): Promise<amqplib.Channel> {
   if (channel) { return channel; }
 
-  const url =
-    process.env['RABBITMQ_URL'] ??
-    'amqp://streamify:streamify_dev_password@localhost:5672';
+  const url = process.env['RABBITMQ_URL'] as string;
 
   const connection = await amqplib.connect(url);
   logger.info('[rabbitmq] connected');

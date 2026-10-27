@@ -2,12 +2,12 @@
  * Profile service — all business logic for profile CRUD.
  *
  * Redis caching strategy:
- *   GET  /users/:id  → read cache first (10 min TTL), fallback to Mongo
- *   PUT  /users/me   → update Mongo, then delete cache (invalidation)
+ *   GET  /users/:id  → read cache first (10 min TTL), fallback to Postgres
+ *   PUT  /users/me   → update Postgres, then delete cache (invalidation)
  */
 
 import type { UpdateProfileInput, UpdatePreferencesInput } from '../validators/user.validators.js';
-import { Profile, type IProfileDocument } from '../models/Profile.js';
+import { prisma } from '../config/prisma.js';
 import { AppError } from '@streamify/shared-middleware';
 import {
   redis,
@@ -16,11 +16,12 @@ import {
 } from '../config/redis.js';
 import { logger } from '@streamify/shared-middleware';
 
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function toPublicProfile(doc: IProfileDocument) {
+function toPublicProfile(doc: any) {
   return {
-    id: (doc._id as { toString(): string }).toString(),
+    id: doc.id,
     authId: doc.authId,
     displayName: doc.displayName,
     avatarUrl: doc.avatarUrl,
@@ -29,17 +30,24 @@ function toPublicProfile(doc: IProfileDocument) {
     followerCount: doc.followerCount,
     followingCount: doc.followingCount,
     isVerifiedArtist: doc.isVerifiedArtist,
-    createdAt: (doc as unknown as { createdAt: Date }).createdAt,
+    createdAt: doc.createdAt,
   };
 }
 
-function toFullProfile(doc: IProfileDocument) {
+function toFullProfile(doc: any) {
   return {
     ...toPublicProfile(doc),
     email: doc.email,
     provider: doc.provider,
-    preferences: doc.preferences,
-    updatedAt: (doc as unknown as { updatedAt: Date }).updatedAt,
+    preferences: {
+      audioQuality: doc.audioQuality,
+      explicitContent: doc.explicitContent,
+      language: doc.language,
+      emailNotifications: doc.emailNotifications,
+      pushNotifications: doc.pushNotifications,
+      preferredGenres: doc.preferredGenres,
+    },
+    updatedAt: doc.updatedAt,
   };
 }
 
@@ -49,7 +57,7 @@ function toFullProfile(doc: IProfileDocument) {
  * GET /users/me — return the calling user's full profile.
  */
 export async function getMyProfile(authId: string) {
-  const doc = await Profile.findOne({ authId });
+  const doc = await prisma.profile.findUnique({ where: { authId } });
   if (!doc) throw AppError.notFound('Profile not found');
   return toFullProfile(doc);
 }
@@ -69,11 +77,11 @@ export async function getPublicProfile(authId: string) {
       return JSON.parse(cached) as ReturnType<typeof toPublicProfile>;
     }
   } catch (err) {
-    logger.warn({ err }, '[profile] Redis read error — falling back to Mongo');
+    logger.warn({ err }, '[profile] Redis read error — falling back to Postgres');
   }
 
-  // ── 2. Mongo fallback ──────────────────────────────────────────────────────
-  const doc = await Profile.findOne({ authId });
+  // ── 2. Postgres fallback ──────────────────────────────────────────────────────
+  const doc = await prisma.profile.findUnique({ where: { authId } });
   if (!doc) throw AppError.notFound('User not found');
 
   const profile = toPublicProfile(doc);
@@ -93,12 +101,15 @@ export async function getPublicProfile(authId: string) {
  * Invalidates the Redis cache so the next GET fetches fresh data.
  */
 export async function updateMyProfile(authId: string, input: UpdateProfileInput) {
-  const doc = await Profile.findOneAndUpdate(
-    { authId },
-    { $set: input },
-    { new: true, runValidators: true },
-  );
-  if (!doc) throw AppError.notFound('Profile not found');
+  let doc;
+  try {
+    doc = await prisma.profile.update({
+      where: { authId },
+      data: input,
+    });
+  } catch (error) {
+    throw AppError.notFound('Profile not found');
+  }
 
   // Invalidate cache
   try {
@@ -117,19 +128,17 @@ export async function updateMyPreferences(
   authId: string,
   input: UpdatePreferencesInput,
 ) {
-  const update: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(input)) {
-    if (v !== undefined) update[`preferences.${k}`] = v;
+  let doc;
+  try {
+    doc = await prisma.profile.update({
+      where: { authId },
+      data: input as any, // TypeScript needs help since keys match directly on model
+    });
+  } catch (error) {
+    throw AppError.notFound('Profile not found');
   }
 
-  const doc = await Profile.findOneAndUpdate(
-    { authId },
-    { $set: update },
-    { new: true, runValidators: true },
-  );
-  if (!doc) throw AppError.notFound('Profile not found');
-
-  return doc.preferences;
+  return toFullProfile(doc).preferences;
 }
 
 /**
@@ -143,17 +152,15 @@ export async function upsertProfileFromEvent(payload: {
   avatarUrl?: string;
   provider: string;
 }) {
-  await Profile.updateOne(
-    { authId: payload.authId },
-    {
-      $setOnInsert: {
-        authId: payload.authId,
-        email: payload.email,
-        displayName: payload.displayName,
-        avatarUrl: payload.avatarUrl,
-        provider: payload.provider,
-      },
+  await prisma.profile.upsert({
+    where: { authId: payload.authId },
+    update: {}, // Only insert if missing
+    create: {
+      authId: payload.authId,
+      email: payload.email,
+      displayName: payload.displayName,
+      avatarUrl: payload.avatarUrl,
+      provider: payload.provider,
     },
-    { upsert: true },
-  );
+  });
 }

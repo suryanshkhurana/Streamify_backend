@@ -24,7 +24,6 @@ import {
   globalErrorHandler,
 } from '@streamify/shared-middleware';
 
-import { connectDB } from './config/db.js';
 import playlistRouter from './routes/playlist.routes.js';
 import likesRouter from './routes/likes.routes.js';
 
@@ -67,7 +66,7 @@ app.use(globalErrorHandler);
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 async function start(): Promise<void> {
-  await connectDB();
+  logger.info('[postgres] prisma client initialized');
 
   app.listen(PORT, () => {
     logger.info(`[playlist-service] listening on http://localhost:${PORT}`);

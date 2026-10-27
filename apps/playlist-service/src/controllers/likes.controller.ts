@@ -1,6 +1,7 @@
 import type { Request, Response, RequestHandler } from 'express';
 import { AppError, catchAsync } from '@streamify/shared-middleware';
-import { Like } from '../models/likes.model.js';
+import { prisma } from '../config/prisma.js';
+
 
 function toPage(query: unknown): { page: number; limit: number } {
   const q = query as { page?: string; limit?: string };
@@ -15,10 +16,12 @@ export const likeTrack: RequestHandler = catchAsync(async (req: Request, res: Re
   const { trackId } = req.params as { trackId: string };
 
   try {
-    const like = await Like.create({ userId, trackId });
+    const like = await prisma.like.create({ 
+      data: { userId, entityId: trackId, entityType: 'TRACK' } 
+    });
     res.status(201).json({ success: true, data: like });
   } catch (err: any) {
-    if (err.code === 11000) {
+    if (err && err.code === 'P2002') {
       // Duplicate key error
       res.status(200).json({ success: true, message: 'Already liked' });
     } else {
@@ -31,9 +34,17 @@ export const unlikeTrack: RequestHandler = catchAsync(async (req: Request, res: 
   const userId = req.userId!;
   const { trackId } = req.params as { trackId: string };
 
-  const result = await Like.deleteOne({ userId, trackId });
-  if (result.deletedCount === 0) {
-    throw AppError.notFound('Like not found');
+  try {
+    await prisma.like.delete({ 
+      where: { 
+        userId_entityId_entityType: { userId, entityId: trackId, entityType: 'TRACK' }
+      } 
+    });
+  } catch (err: any) {
+    if (err && err.code === 'P2025') {
+      throw AppError.notFound('Like not found');
+    }
+    throw err;
   }
 
   res.status(204).send();
@@ -42,12 +53,17 @@ export const unlikeTrack: RequestHandler = catchAsync(async (req: Request, res: 
 export const getLikedSongs: RequestHandler = catchAsync(async (req: Request, res: Response) => {
   const userId = req.userId!;
   const { page, limit } = toPage(req.query);
+  const skip = (page - 1) * limit;
 
-  const total = await Like.countDocuments({ userId });
-  const likes = await Like.find({ userId })
-    .sort({ createdAt: -1 })
-    .skip((page - 1) * limit)
-    .limit(limit);
+  const [total, likes] = await Promise.all([
+    prisma.like.count({ where: { userId, entityType: 'TRACK' } }),
+    prisma.like.findMany({
+      where: { userId, entityType: 'TRACK' },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit,
+    })
+  ]);
 
   res.json({
     success: true,

@@ -1,0 +1,34 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Playlist {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  ownerId     String
+  isPublic    Boolean  @default(true)
+  tracks      String[] // Array of track IDs
+  collaborators String[] @default([])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+model Like {
+  id         String   @id @default(uuid())
+  userId     String
+  entityId   String
+  entityType String   // e.g. "TRACK", "PLAYLIST"
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, entityId, entityType])
+  @@index([userId])
+}

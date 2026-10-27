@@ -25,9 +25,7 @@ import type {
 
 const EXCHANGE_NAME = 'streamify.events';
 const EXCHANGE_TYPE = 'topic';
-const RABBITMQ_URL =
-  process.env['RABBITMQ_URL'] ??
-  'amqp://streamify:streamify_dev_password@localhost:5672';
+const RABBITMQ_URL = process.env['RABBITMQ_URL'] as string;
 
 /** Dedicated work-queue for old profile picture S3 cleanup tasks. */
 export const PFP_CLEANUP_QUEUE = 'user-service.pfp.cleanup';

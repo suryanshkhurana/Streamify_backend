@@ -1,14 +1,13 @@
 /**
  * Follow service — follow / unfollow users and artists.
  *
- * Counts are maintained on the Profile documents using $inc to keep
+ * Counts are maintained on the Profile documents using increment to keep
  * followerCount / followingCount eventually consistent without transactions.
  */
 
 import type { FollowTargetType } from '@streamify/shared-types';
 import type { FollowInput } from '../validators/user.validators.js';
-import { Follow } from '../models/Follow.js';
-import { Profile } from '../models/Profile.js';
+import { prisma } from '../config/prisma.js';
 import { AppError, logger } from '@streamify/shared-middleware';
 import { publishUserFollowed } from '../events/publisher.js';
 
@@ -27,24 +26,22 @@ export async function followUser(
 
   // Verify target exists when following a USER
   if (input.targetType === 'USER') {
-    const target = await Profile.findOne({ authId: followedId });
+    const target = await prisma.profile.findUnique({ where: { authId: followedId } });
     if (!target) throw AppError.notFound('User not found');
   }
 
   try {
-    await Follow.create({
-      followerId,
-      followedId,
-      targetType: input.targetType as FollowTargetType,
+    await prisma.follow.create({
+      data: {
+        followerId,
+        followingId: followedId,
+        // Prisma schema doesn't store targetType, but if needed we can assume USER
+      },
     });
   } catch (err: unknown) {
-    // Mongo duplicate key error code = 11000
-    if (
-      err instanceof Error &&
-      'code' in err &&
-      Number((err as NodeJS.ErrnoException).code) === 11000
-    ) {
-      throw AppError.conflict('Already following this user');
+    // Prisma unique constraint error code = P2002
+    if (err && (err as any).code === 'P2002') {
+      throw AppError.badRequest('Already following this user');
     }
     throw err;
   }
@@ -52,12 +49,14 @@ export async function followUser(
   // Update counters
   if (input.targetType === 'USER') {
     const [followerDoc] = await Promise.all([
-      Profile.findOneAndUpdate(
-        { authId: followerId },
-        { $inc: { followingCount: 1 } },
-        { new: true },
-      ),
-      Profile.updateOne({ authId: followedId }, { $inc: { followerCount: 1 } }),
+      prisma.profile.update({
+        where: { authId: followerId },
+        data: { followingCount: { increment: 1 } },
+      }).catch(() => null), // Catch if profile doesn't exist
+      prisma.profile.update({
+        where: { authId: followedId },
+        data: { followerCount: { increment: 1 } },
+      }).catch(() => null),
     ]);
 
     // Publish event so notification-service can alert the followed user
@@ -69,7 +68,10 @@ export async function followUser(
     });
   } else {
     // Artist follow — only increment the follower's following count
-    await Profile.updateOne({ authId: followerId }, { $inc: { followingCount: 1 } });
+    await prisma.profile.update({
+      where: { authId: followerId },
+      data: { followingCount: { increment: 1 } },
+    }).catch(() => null);
 
     // Still publish so notification-service can notify the artist
     await publishUserFollowed({
@@ -92,20 +94,39 @@ export async function unfollowUser(
   followedId: string,
   targetType: FollowTargetType,
 ): Promise<void> {
-  const result = await Follow.deleteOne({ followerId, followedId, targetType });
-
-  if (result.deletedCount === 0) {
-    throw AppError.notFound('Follow relationship not found');
+  try {
+    await prisma.follow.delete({
+      where: {
+        followerId_followingId: {
+          followerId,
+          followingId: followedId,
+        }
+      }
+    });
+  } catch (err) {
+    if (err && (err as any).code === 'P2025') {
+      throw AppError.notFound('Follow relationship not found');
+    }
+    throw err;
   }
 
   // Update counters
   if (targetType === 'USER') {
     await Promise.all([
-      Profile.updateOne({ authId: followerId }, { $inc: { followingCount: -1 } }),
-      Profile.updateOne({ authId: followedId }, { $inc: { followerCount: -1 } }),
+      prisma.profile.update({
+        where: { authId: followerId },
+        data: { followingCount: { decrement: 1 } },
+      }).catch(() => null),
+      prisma.profile.update({
+        where: { authId: followedId },
+        data: { followerCount: { decrement: 1 } },
+      }).catch(() => null),
     ]);
   } else {
-    await Profile.updateOne({ authId: followerId }, { $inc: { followingCount: -1 } });
+    await prisma.profile.update({
+      where: { authId: followerId },
+      data: { followingCount: { decrement: 1 } },
+    }).catch(() => null);
   }
 
   logger.info({ followerId, followedId, targetType }, '[follow] deleted');
@@ -121,18 +142,22 @@ export async function getFollowers(
 ) {
   const skip = (page - 1) * limit;
   const [follows, total] = await Promise.all([
-    Follow.find({ followedId: authId, targetType: 'USER' })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    Follow.countDocuments({ followedId: authId, targetType: 'USER' }),
+    prisma.follow.findMany({
+      where: { followingId: authId }, // People who are following authId
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit,
+    }),
+    prisma.follow.count({
+      where: { followingId: authId },
+    }),
   ]);
 
-  const followerIds = follows.map((f) => f.followerId);
-  const profiles = await Profile.find({ authId: { $in: followerIds } })
-    .select('authId displayName avatarUrl isVerifiedArtist')
-    .lean();
+  const followerIds = follows.map((f: any) => f.followerId);
+  const profiles = await prisma.profile.findMany({
+    where: { authId: { in: followerIds } },
+    select: { authId: true, displayName: true, avatarUrl: true, isVerifiedArtist: true },
+  });
 
   return { profiles, total, page, limit, totalPages: Math.ceil(total / limit) };
 }
@@ -147,18 +172,22 @@ export async function getFollowing(
 ) {
   const skip = (page - 1) * limit;
   const [follows, total] = await Promise.all([
-    Follow.find({ followerId: authId, targetType: 'USER' })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    Follow.countDocuments({ followerId: authId, targetType: 'USER' }),
+    prisma.follow.findMany({
+      where: { followerId: authId }, // People who authId is following
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit,
+    }),
+    prisma.follow.count({
+      where: { followerId: authId },
+    }),
   ]);
 
-  const followedIds = follows.map((f) => f.followedId);
-  const profiles = await Profile.find({ authId: { $in: followedIds } })
-    .select('authId displayName avatarUrl isVerifiedArtist')
-    .lean();
+  const followedIds = follows.map((f: any) => f.followingId);
+  const profiles = await prisma.profile.findMany({
+    where: { authId: { in: followedIds } },
+    select: { authId: true, displayName: true, avatarUrl: true, isVerifiedArtist: true },
+  });
 
   return { profiles, total, page, limit, totalPages: Math.ceil(total / limit) };
 }

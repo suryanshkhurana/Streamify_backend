@@ -7,7 +7,7 @@
 
 import type { Request, Response, RequestHandler } from 'express';
 import { AppError, catchAsync } from '@streamify/shared-middleware';
-import { Playlist, type IPlaylist } from '../models/playlist.model.js';
+import { prisma } from '../config/prisma.js';
 import type {
   CreatePlaylistDto,
   UpdatePlaylistDto,
@@ -21,14 +21,6 @@ import type {
 
 function toPage(query: unknown): ListPlaylistsQuery {
   return query as ListPlaylistsQuery;
-}
-
-// Normalize track positions so they are 0-indexed and contiguous
-function normalizePositions(playlist: IPlaylist): void {
-  playlist.tracks.sort((a, b) => a.position - b.position);
-  playlist.tracks.forEach((t, i) => {
-    t.position = i;
-  });
 }
 
 // ─── Featured playlists (static seed) ────────────────────────────────────────
@@ -77,21 +69,25 @@ export const getFeatured: RequestHandler = catchAsync(
 
 export const listMyPlaylists: RequestHandler = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
-    const { page, limit, visibility } = toPage(req.query);
+    const { page = 1, limit = 20, visibility } = toPage(req.query);
+    const skip = (page - 1) * limit;
 
-    const filter: Record<string, unknown> = { ownerId: req.userId };
-    if (visibility) filter['visibility'] = visibility;
+    const where: any = { ownerId: req.userId };
+    if (visibility) where.isPublic = visibility === 'public';
 
-    const total = await Playlist.countDocuments(filter);
-    const playlists = await Playlist.find(filter)
-      .select('-tracks')
-      .sort({ updatedAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
+    const [total, playlists] = await Promise.all([
+      prisma.playlist.count({ where }),
+      prisma.playlist.findMany({
+        where,
+        orderBy: { updatedAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+    ]);
 
     res.json({
       success: true,
-      data: playlists,
+      data: playlists.map(p => ({ ...p, visibility: p.isPublic ? 'public' : 'private' })),
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
     });
   },
@@ -101,19 +97,23 @@ export const listMyPlaylists: RequestHandler = catchAsync(
 
 export const listPublicPlaylists: RequestHandler = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
-    const { page, limit } = toPage(req.query);
+    const { page = 1, limit = 20 } = toPage(req.query);
+    const skip = (page - 1) * limit;
 
-    const filter = { visibility: 'public' };
-    const total = await Playlist.countDocuments(filter);
-    const playlists = await Playlist.find(filter)
-      .select('-tracks')
-      .sort({ updatedAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
+    const where = { isPublic: true };
+    const [total, playlists] = await Promise.all([
+      prisma.playlist.count({ where }),
+      prisma.playlist.findMany({
+        where,
+        orderBy: { updatedAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+    ]);
 
     res.json({
       success: true,
-      data: playlists,
+      data: playlists.map(p => ({ ...p, visibility: 'public' })),
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
     });
   },
@@ -125,17 +125,18 @@ export const createPlaylist: RequestHandler = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
     const body = req.body as CreatePlaylistDto;
 
-    const playlist = await Playlist.create({
-      ownerId:       req.userId,
-      name:          body.name,
-      description:   body.description ?? '',
-      coverUrl:      body.coverUrl ?? '',
-      visibility:    body.visibility ?? 'private',
-      collaborators: body.collaborators ?? [],
-      tracks:        [],
+    const playlist = await prisma.playlist.create({
+      data: {
+        ownerId:       req.userId!,
+        title:         body.name, // Prisma schema uses title!
+        description:   body.description ?? '',
+        isPublic:      body.visibility !== 'private',
+        collaborators: body.collaborators ?? [],
+        tracks:        [],
+      },
     });
 
-    res.status(201).json({ success: true, data: playlist });
+    res.status(201).json({ success: true, data: { ...playlist, visibility: playlist.isPublic ? 'public' : 'private', name: playlist.title } });
   },
 );
 
@@ -146,13 +147,15 @@ export const getPlaylist: RequestHandler = catchAsync(
     const { id } = req.params;
     const userId = req.userId;
 
-    const playlist = await Playlist.findById(id);
+    const playlist = await prisma.playlist.findUnique({
+      where: { id },
+    });
 
     if (!playlist) {
       throw AppError.notFound(`Playlist ${id} not found`);
     }
 
-    if (playlist.visibility === 'private') {
+    if (!playlist.isPublic) {
       const canView =
         userId &&
         (playlist.ownerId === userId ||
@@ -163,9 +166,7 @@ export const getPlaylist: RequestHandler = catchAsync(
       }
     }
 
-    playlist.tracks.sort((a, b) => a.position - b.position);
-
-    res.json({ success: true, data: playlist });
+    res.json({ success: true, data: { ...playlist, visibility: playlist.isPublic ? 'public' : 'private', name: playlist.title } });
   },
 );
 
@@ -173,18 +174,22 @@ export const getPlaylist: RequestHandler = catchAsync(
 
 export const updatePlaylist: RequestHandler = catchAsync(
   async (_req: Request, res: Response): Promise<void> => {
-    const playlist = res.locals['playlist'] as IPlaylist;
+    // Note: The original middleware `requireOwnerOrCollaborator` attached `playlist` to res.locals
+    const playlistId = (res.locals['playlist'] as any).id;
     const body = _req.body as UpdatePlaylistDto;
 
-    if (body.name          !== undefined) playlist.name          = body.name;
-    if (body.description   !== undefined) playlist.description   = body.description;
-    if (body.coverUrl      !== undefined) playlist.coverUrl      = body.coverUrl;
-    if (body.visibility    !== undefined) playlist.visibility    = body.visibility;
-    if (body.collaborators !== undefined) playlist.collaborators = body.collaborators;
+    const updateData: any = {};
+    if (body.name          !== undefined) updateData.title         = body.name;
+    if (body.description   !== undefined) updateData.description   = body.description;
+    if (body.visibility    !== undefined) updateData.isPublic      = body.visibility === 'public';
+    if (body.collaborators !== undefined) updateData.collaborators = body.collaborators;
 
-    await playlist.save();
+    const updated = await prisma.playlist.update({
+      where: { id: playlistId },
+      data: updateData,
+    });
 
-    res.json({ success: true, data: playlist });
+    res.json({ success: true, data: { ...updated, visibility: updated.isPublic ? 'public' : 'private', name: updated.title } });
   },
 );
 
@@ -192,13 +197,15 @@ export const updatePlaylist: RequestHandler = catchAsync(
 
 export const deletePlaylist: RequestHandler = catchAsync(
   async (_req: Request, res: Response): Promise<void> => {
-    const playlist = res.locals['playlist'] as IPlaylist;
+    const playlist = res.locals['playlist'] as any;
 
-    if (playlist.isSystemPlaylist) {
+    if (playlist.title === 'Favorites') {
       throw AppError.forbidden('System playlists cannot be deleted');
     }
 
-    await playlist.deleteOne();
+    await prisma.playlist.delete({
+      where: { id: playlist.id },
+    });
 
     res.status(204).send();
   },
@@ -208,29 +215,23 @@ export const deletePlaylist: RequestHandler = catchAsync(
 
 export const addTracks: RequestHandler = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
-    const playlist = res.locals['playlist'] as IPlaylist;
+    const playlist = res.locals['playlist'] as any;
     const { trackIds } = req.body as AddTracksDto;
-    const userId = req.userId!;
 
-    const existingIds = new Set(playlist.tracks.map((t) => t.trackId));
-    let nextPosition = playlist.tracks.length;
-
+    const existingIds = new Set(playlist.tracks);
+    const newTracksData = [...playlist.tracks];
     for (const trackId of trackIds) {
       if (existingIds.has(trackId)) continue;
-
-      playlist.tracks.push({
-        trackId,
-        addedBy:  userId,
-        position: nextPosition++,
-        addedAt:  new Date(),
-      });
-
+      newTracksData.push(trackId);
       existingIds.add(trackId);
     }
 
-    await playlist.save();
+    const updatedPlaylist = await prisma.playlist.update({
+      where: { id: playlist.id },
+      data: { tracks: newTracksData },
+    });
 
-    res.json({ success: true, data: playlist });
+    res.json({ success: true, data: { ...updatedPlaylist, visibility: updatedPlaylist.isPublic ? 'public' : 'private', name: updatedPlaylist.title } });
   },
 );
 
@@ -238,21 +239,19 @@ export const addTracks: RequestHandler = catchAsync(
 
 export const removeTrack: RequestHandler = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
-    const playlist = res.locals['playlist'] as IPlaylist;
+    const playlist = res.locals['playlist'] as any;
     const { trackId } = req.params;
 
-    const before = playlist.tracks.length;
-    playlist.tracks = playlist.tracks.filter((t) => t.trackId !== trackId);
-
-    if (playlist.tracks.length === before) {
+    if (!playlist.tracks.includes(trackId)) {
       throw AppError.notFound(`Track ${trackId} is not in this playlist`);
     }
 
-    normalizePositions(playlist);
+    const updatedPlaylist = await prisma.playlist.update({
+      where: { id: playlist.id },
+      data: { tracks: playlist.tracks.filter((t: string) => t !== trackId) },
+    });
 
-    await playlist.save();
-
-    res.json({ success: true, data: playlist });
+    res.json({ success: true, data: { ...updatedPlaylist, visibility: updatedPlaylist.isPublic ? 'public' : 'private', name: updatedPlaylist.title } });
   },
 );
 
@@ -260,31 +259,22 @@ export const removeTrack: RequestHandler = catchAsync(
 
 export const reorderTracks: RequestHandler = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
-    const playlist = res.locals['playlist'] as IPlaylist;
+    const playlist = res.locals['playlist'] as any;
     const { trackIds } = req.body as ReorderTracksDto;
 
-    const positionMap = new Map<string, number>();
-    trackIds.forEach((id, idx) => positionMap.set(id, idx));
-
-    const playlistTrackIds = new Set(playlist.tracks.map((t) => t.trackId));
+    const playlistTrackIds = new Set(playlist.tracks);
     for (const id of trackIds) {
       if (!playlistTrackIds.has(id)) {
         throw AppError.badRequest(`Track ${id} is not in this playlist`);
       }
     }
 
-    playlist.tracks.forEach((t) => {
-      const newPos = positionMap.get(t.trackId);
-      if (newPos !== undefined) {
-        t.position = newPos;
-      }
+    const updatedPlaylist = await prisma.playlist.update({
+      where: { id: playlist.id },
+      data: { tracks: trackIds },
     });
 
-    playlist.tracks.sort((a, b) => a.position - b.position);
-
-    await playlist.save();
-
-    res.json({ success: true, data: playlist });
+    res.json({ success: true, data: { ...updatedPlaylist, visibility: updatedPlaylist.isPublic ? 'public' : 'private', name: updatedPlaylist.title } });
   },
 );
 
@@ -292,19 +282,24 @@ export const reorderTracks: RequestHandler = catchAsync(
 
 export const addCollaborator: RequestHandler = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
-    const playlist = res.locals['playlist'] as IPlaylist;
+    const playlist = res.locals['playlist'] as any;
     const { userId } = req.body as AddCollaboratorDto;
 
     if (playlist.ownerId === userId) {
       throw AppError.badRequest('Owner cannot be added as a collaborator');
     }
 
+    let updatedPlaylist = playlist;
     if (!playlist.collaborators.includes(userId)) {
-      playlist.collaborators.push(userId);
-      await playlist.save();
+      updatedPlaylist = await prisma.playlist.update({
+        where: { id: playlist.id },
+        data: {
+          collaborators: [...playlist.collaborators, userId]
+        }
+      });
     }
 
-    res.json({ success: true, data: playlist });
+    res.json({ success: true, data: { ...updatedPlaylist, visibility: updatedPlaylist.isPublic ? 'public' : 'private', name: updatedPlaylist.title } });
   },
 );
 
@@ -312,12 +307,18 @@ export const addCollaborator: RequestHandler = catchAsync(
 
 export const removeCollaborator: RequestHandler = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
-    const playlist = res.locals['playlist'] as IPlaylist;
+    const playlist = res.locals['playlist'] as any;
     const { userId } = req.params;
 
-    playlist.collaborators = playlist.collaborators.filter((c) => c !== userId);
-    await playlist.save();
+    const newCollaborators = playlist.collaborators.filter((c: any) => c !== userId);
 
-    res.json({ success: true, data: playlist });
+    const updatedPlaylist = await prisma.playlist.update({
+      where: { id: playlist.id },
+      data: {
+        collaborators: newCollaborators
+      },
+    });
+
+    res.json({ success: true, data: { ...updatedPlaylist, visibility: updatedPlaylist.isPublic ? 'public' : 'private', name: updatedPlaylist.title } });
   },
 );

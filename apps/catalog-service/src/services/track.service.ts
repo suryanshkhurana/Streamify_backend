@@ -171,10 +171,25 @@ export async function updateTrack(
 
   // Emit status update event when track transitions to READY or FAILED
   if (data.status === 'READY' || data.status === 'FAILED') {
+    // Fetch full track details (including artist + album) so the search-service
+    // can index the track with complete data (title, artistName, coverUrl, etc.)
+    const fullTrack = await prisma.track.findUnique({
+      where: { id: trackId },
+      include: {
+        artist: { select: { name: true } },
+        album:  { select: { title: true, coverUrl: true } },
+      },
+    });
+
     publishTrackStatusUpdated({
-      trackId: updated.id,
-      artistId: updated.artistId,
-      status: updated.status,
+      trackId:    updated.id,
+      artistId:   updated.artistId,
+      status:     updated.status,
+      title:      fullTrack?.title ?? '',
+      artistName: fullTrack?.artist?.name ?? '',
+      albumTitle: fullTrack?.album?.title ?? '',
+      coverUrl:   fullTrack?.album?.coverUrl ?? fullTrack?.coverUrl ?? '',
+      durationMs: fullTrack?.durationMs ?? 0,
       ...(data.s3KeyHls ? { s3KeyHls: data.s3KeyHls } : {}),
     });
   }

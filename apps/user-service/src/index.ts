@@ -30,7 +30,6 @@ import {
   globalErrorHandler,
 } from '@streamify/shared-middleware';
 
-import { connectDB } from './config/db.js';
 import { connectRedis } from './config/redis.js';
 import { startConsumer } from './events/consumer.js';
 import userRouter from './routes/user.routes.js';
@@ -81,9 +80,9 @@ app.use(globalErrorHandler);
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
 async function bootstrap(): Promise<void> {
-  // MongoDB
-  await connectDB();
-  logger.info('[mongodb] connected');
+  // Postgres (Prisma) connects automatically on first query.
+  // We can just log that it's ready to handle requests.
+  logger.info('[postgres] prisma client initialized');
 
   // Redis (non-fatal — service works without cache)
   try {

@@ -12,13 +12,9 @@
  */
 
 import ffmpeg from 'fluent-ffmpeg';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '@streamify/shared-middleware';
-
-// Point fluent-ffmpeg to the static binary we just installed
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 export interface TranscodeVariant {
   /** bitrate label, e.g. "128k" */
@@ -58,84 +54,97 @@ export async function transcodeToHls(
 ): Promise<TranscodeResult> {
   const files: TranscodeResult['files'] = [];
 
-  // Run each variant sequentially to avoid overloading the CPU
+  // 1. Create subdirectories for all variants
   for (const variant of VARIANTS) {
     const variantDir = path.join(outDir, variant.label);
     fs.mkdirSync(variantDir, { recursive: true });
+  }
 
-    const segmentPattern = path.join(variantDir, 'segment%03d.ts');
-    const playlistPath = path.join(variantDir, `${variant.label}.m3u8`);
+  const masterPath = path.join(outDir, 'master.m3u8');
 
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(inputPath)
-        .audioCodec('aac')
-        .audioBitrate(variant.bitrate)
-        .audioChannels(2)
-        .audioFrequency(44100)
-        .outputOptions([
-          '-f hls',
-          `-hls_time ${variant.segmentDuration}`,
-          '-hls_list_size 0',
-          '-hls_flags independent_segments',
-          `-hls_segment_filename ${segmentPattern}`,
-        ])
-        .output(playlistPath)
-        .on('start', (cmd) => {
-          logger.debug({ cmd, variant: variant.label }, '[transcoder] ffmpeg started');
-        })
-        .on('progress', (progress) => {
-          logger.debug(
-            { timemark: progress.timemark, variant: variant.label },
-            '[transcoder] progress',
-          );
-        })
-        .on('end', () => {
-          logger.info({ variant: variant.label }, '[transcoder] variant complete');
-          resolve();
-        })
-        .on('error', (err) => {
-          logger.error({ err, variant: variant.label }, '[transcoder] ffmpeg error');
-          reject(err);
-        })
-        .run();
-    });
+  // 2. Build FFmpeg options for a single pass
+  const streamMapItems: string[] = [];
 
-    // Collect the variant playlist
-    files.push({
-      localPath: playlistPath,
-      s3Key: `hls/${trackId}/${variant.label}/${variant.label}.m3u8`,
-    });
+  VARIANTS.forEach((variant, index) => {
+    // Add to var_stream_map
+    streamMapItems.push(`a:${index},name:${variant.label}`);
+  });
 
-    // Collect all .ts segments
-    const segments = fs.readdirSync(variantDir).filter((f) => f.endsWith('.ts'));
+  // Output pattern for the variant playlists (e.g., 128k.m3u8, 256k.m3u8, 320k.m3u8)
+  const outputPathPattern = path.join(outDir, '%v.m3u8').replace(/\\/g, '/');
+
+  // Unified segment filename pattern (e.g. 128k_segment000.ts)
+  const segmentFilenamePattern = path.join(outDir, '%v_segment%03d.ts').replace(/\\/g, '/');
+
+  const outputOptions: string[] = [];
+  VARIANTS.forEach((variant, index) => {
+    outputOptions.push('-map', '0:a');
+    outputOptions.push(`-c:a:${index}`, 'aac');
+    outputOptions.push(`-b:a:${index}`, variant.bitrate);
+    outputOptions.push(`-ac:a:${index}`, '2');
+    outputOptions.push(`-ar:a:${index}`, '44100');
+  });
+
+  // HLS global options
+  outputOptions.push(
+    '-f', 'hls',
+    '-hls_time', String(VARIANTS[0].segmentDuration),
+    '-hls_list_size', '0',
+    '-hls_flags', 'independent_segments',
+    '-master_pl_name', 'master.m3u8',
+    '-var_stream_map', streamMapItems.join(' '),
+    '-hls_segment_filename', segmentFilenamePattern
+  );
+
+  // 3. Execute FFmpeg
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .noVideo()
+      .outputOptions(outputOptions)
+      .output(outputPathPattern)
+      .on('start', (cmd: string) => {
+        logger.info({ cmd }, '[transcoder] ffmpeg multi-bitrate started');
+      })
+      .on('progress', (progress: any) => {
+        logger.debug({ timemark: progress.timemark }, '[transcoder] progress');
+      })
+      .on('end', () => {
+        logger.info('[transcoder] transcoding complete');
+        resolve();
+      })
+      .on('error', (err: any, stdout: any, stderr: any) => {
+        logger.error({ err, stdout, stderr }, '[transcoder] ffmpeg error');
+        reject(err);
+      })
+      .run();
+  });
+
+  // 4. Collect generated files for S3 upload
+  const masterKey = `hls/${trackId}/master.m3u8`;
+  files.push({ localPath: masterPath, s3Key: masterKey });
+
+  for (const variant of VARIANTS) {
+    // Collect variant playlist
+    const playlistName = `${variant.label}.m3u8`;
+    const playlistLocalPath = path.join(outDir, playlistName);
+    if (fs.existsSync(playlistLocalPath)) {
+      files.push({
+        localPath: playlistLocalPath,
+        s3Key: `hls/${trackId}/${playlistName}`,
+      });
+    }
+
+    // Collect all .ts segments for this variant from outDir
+    const allFiles = fs.readdirSync(outDir);
+    const segments = allFiles.filter((f: string) => f.startsWith(`${variant.label}_segment`) && f.endsWith('.ts'));
+    
     for (const seg of segments) {
       files.push({
-        localPath: path.join(variantDir, seg),
-        s3Key: `hls/${trackId}/${variant.label}/${seg}`,
+        localPath: path.join(outDir, seg),
+        s3Key: `hls/${trackId}/${seg}`,
       });
     }
   }
-
-  // ── Write the master playlist ──────────────────────────────────────────────
-  const masterPlaylist = [
-    '#EXTM3U',
-    '#EXT-X-VERSION:3',
-    '',
-    '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"',
-    `128k/128k.m3u8`,
-    '',
-    '#EXT-X-STREAM-INF:BANDWIDTH=256000,CODECS="mp4a.40.2"',
-    `256k/256k.m3u8`,
-    '',
-    '#EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS="mp4a.40.2"',
-    `320k/320k.m3u8`,
-  ].join('\n');
-
-  const masterPath = path.join(outDir, 'master.m3u8');
-  fs.writeFileSync(masterPath, masterPlaylist, 'utf8');
-
-  const masterKey = `hls/${trackId}/master.m3u8`;
-  files.push({ localPath: masterPath, s3Key: masterKey });
 
   logger.info(
     { trackId, fileCount: files.length },

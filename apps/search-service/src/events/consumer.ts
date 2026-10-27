@@ -8,7 +8,7 @@ const QUEUE_NAME = 'search_service_indexer';
 let channel: amqplib.Channel | null = null;
 
 export async function initRabbitMQ(): Promise<void> {
-  const url = process.env['RABBITMQ_URL'] ?? 'amqp://streamify:streamify_dev_password@localhost:5672';
+  const url = process.env['RABBITMQ_URL'] as string;
   
   try {
     const connection = await amqplib.connect(url);

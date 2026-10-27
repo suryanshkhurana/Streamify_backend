@@ -1,0 +1,56 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  id                 String   @id @default(uuid())
+  authId             String   @unique
+  email              String   @unique
+  displayName        String
+  avatarUrl          String?
+  country            String?
+  bio                String?
+  provider           String
+  followerCount      Int      @default(0)
+  followingCount     Int      @default(0)
+  isVerifiedArtist   Boolean  @default(false)
+
+  audioQuality       String   @default("NORMAL")
+  explicitContent    Boolean  @default(true)
+  language           String   @default("en-US")
+  emailNotifications Boolean  @default(true)
+  pushNotifications  Boolean  @default(true)
+  preferredGenres    String[]
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model Follow {
+  id          String   @id @default(uuid())
+  followerId  String
+  followingId String
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+}
+
+model ListeningHistory {
+  id               String   @id @default(uuid())
+  userId           String
+  trackId          String
+  durationPlayedMs Int?
+  completionRatio  Float?
+  playedAt         DateTime @default(now())
+  context          String?
+
+  @@index([userId])
+}

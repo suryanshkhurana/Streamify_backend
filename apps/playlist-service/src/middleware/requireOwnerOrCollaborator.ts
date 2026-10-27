@@ -6,14 +6,14 @@
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { AppError, catchAsync } from '@streamify/shared-middleware';
-import { Playlist } from '../models/playlist.model.js';
+import { prisma } from '../config/prisma.js';
 
 export const requireOwnerOrCollaborator: RequestHandler = catchAsync(
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const { id } = req.params;
     const userId = req.userId!;
 
-    const playlist = await Playlist.findById(id);
+    const playlist = await prisma.playlist.findUnique({ where: { id } });
 
     if (!playlist) {
       throw AppError.notFound(`Playlist ${id} not found`);
@@ -37,7 +37,7 @@ export const requireOwner: RequestHandler = catchAsync(
     const { id } = req.params;
     const userId = req.userId!;
 
-    const playlist = await Playlist.findById(id);
+    const playlist = await prisma.playlist.findUnique({ where: { id } });
 
     if (!playlist) {
       throw AppError.notFound(`Playlist ${id} not found`);

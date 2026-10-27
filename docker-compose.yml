@@ -243,8 +243,8 @@ services:
       PORT: 3002
       NODE_ENV: production
       LOG_LEVEL: info
-      # MongoDB Atlas — set MONGODB_URI_USERS in your root .env
-      MONGODB_URI:   ${MONGODB_URI_USERS}
+      # PostgreSQL for user data
+      DATABASE_URL:  postgresql://streamify:streamify_dev_password@postgres:5432/streamify_users
       REDIS_URL:     *redis-url
       RABBITMQ_URL:  *rabbitmq-url
       JWT_SECRET:    *jwt-secret
@@ -256,6 +256,8 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       CLOUDFRONT_DOMAIN:     ${CLOUDFRONT_DOMAIN}
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       rabbitmq:
@@ -283,6 +285,7 @@ services:
       RABBITMQ_URL: *rabbitmq-url
       JWT_SECRET:   *jwt-secret
       CORS_ORIGIN:  *cors-origin
+      USER_SERVICE_URL: http://user-service:3002
       # AWS S3 for audio file uploads
       S3_BUCKET:             ${S3_BUCKET:-streamify-music-storage}
       AWS_REGION:            ${AWS_REGION:-ap-south-1}
@@ -379,12 +382,14 @@ services:
       PORT: 3006
       NODE_ENV: production
       LOG_LEVEL: info
-      # MongoDB Atlas — set MONGODB_URI_PLAYLISTS in your root .env
-      MONGODB_URI:  ${MONGODB_URI_PLAYLISTS}
+      # PostgreSQL for playlists
+      DATABASE_URL: postgresql://streamify:streamify_dev_password@postgres:5432/streamify_playlists
       RABBITMQ_URL: *rabbitmq-url
       JWT_SECRET:   *jwt-secret
       CORS_ORIGIN:  *cors-origin
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     networks:
@@ -491,8 +496,14 @@ services:
     ports:
       - "5173:5173"
     environment:
+      API_GATEWAY_URL:      http://api-gateway:3000
       VITE_API_BASE_URL:    ${VITE_API_BASE_URL:-http://localhost:3000}
       VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+    volumes:
+      - ./apps/web:/app/apps/web
+      - ./packages:/app/packages
+      - /app/apps/web/node_modules
+      - /app/packages/shared-types/node_modules
     depends_on:
       - api-gateway
     networks:

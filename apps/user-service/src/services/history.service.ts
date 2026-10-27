@@ -3,20 +3,22 @@
  */
 
 import type { TrackPlayedPayload } from '@streamify/shared-types';
-import { ListeningHistory } from '../models/ListeningHistory.js';
+import { prisma } from '../config/prisma.js';
 
 /**
  * Append a history entry from a track.played event payload.
  * Called by the RabbitMQ consumer.
  */
 export async function appendHistory(payload: TrackPlayedPayload): Promise<void> {
-  await ListeningHistory.create({
-    userId: payload.userId,
-    trackId: payload.trackId,
-    durationPlayedMs: payload.durationPlayedMs,
-    completionRatio: payload.completionRatio,
-    context: payload.context,
-    playedAt: new Date(payload.playedAt),
+  await prisma.listeningHistory.create({
+    data: {
+      userId: payload.userId,
+      trackId: payload.trackId,
+      durationPlayedMs: payload.durationPlayedMs,
+      completionRatio: payload.completionRatio,
+      context: payload.context as unknown as string,
+      playedAt: new Date(payload.playedAt),
+    }
   });
 }
 
@@ -30,12 +32,15 @@ export async function getMyHistory(
 ) {
   const skip = (page - 1) * limit;
   const [entries, total] = await Promise.all([
-    ListeningHistory.find({ userId })
-      .sort({ playedAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    ListeningHistory.countDocuments({ userId }),
+    prisma.listeningHistory.findMany({
+      where: { userId },
+      orderBy: { playedAt: 'desc' },
+      skip,
+      take: limit,
+    }),
+    prisma.listeningHistory.count({
+      where: { userId },
+    }),
   ]);
 
   return {
